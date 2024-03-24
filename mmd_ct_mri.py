@@ -19,6 +19,8 @@ import pathlib
 import json
 import datetime
 import traceback
+import random
+import time
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -26,42 +28,15 @@ plt.style.use('ggplot')
 
 from torch.optim.lr_scheduler import _LRScheduler
 from utils.resnet import ResNet
-from utils.dataset import CTMRDataset, PelvisDataset
+from utils.dataset import CTMRDataset
 from utils.vqvae_2 import VQVAE
-# from utils.vqvae_1 import VQVAE_1
-from utils.AE import AutoEncoder
+from utils.ema import EMA
 
 
 
-'''
-    Consider to choose:
-    1. 'wide_resnet50_2', # choose the feature space as 2048,8,8
-    2. 'vit_base_resnet50d_224'
-'''
 def flatten(img):
     img_flatten = img.view(img.size(0), -1)
     return img_flatten
-
-def l1_reg(model):
-    loss_reg = 0.
-    for param in model.parameters():
-        loss_reg += torch.sum(torch.abs(param))
-    return loss_reg
-
-def reshape_img(input, rev=False):
-    b_size, n_channel, height, width = input.shape
-    if not rev:
-        squeezed = input.view(b_size, n_channel, height // 2, 2, width // 2, 2)
-        squeezed = squeezed.permute(0, 1, 3, 5, 2, 4)
-        out = squeezed.contiguous().view(b_size, n_channel * 4, height // 2, width // 2)
-        return out
-    else:
-        unsqueezed = input.view(b_size, n_channel // 4, 2, 2, height, width)
-        unsqueezed = unsqueezed.permute(0, 1, 4, 2, 5, 3)
-        unsqueezed = unsqueezed.contiguous().view(
-            b_size, n_channel // 4, height * 2, width * 2
-        )
-        return unsqueezed
 
 
 class PolyLRScheduler(_LRScheduler):
@@ -132,6 +107,10 @@ class AverageCounter(object):
     def restart(self):
         self.count = 0
         self.val = 0
+
+def files_sort(files):
+    files.sort(key=lambda x: int(x.split('/')[-1].split('.')[0][4:]))
+    return files
         
 def guassian_kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
     n_samples = int(source.size()[0])+int(target.size()[0])
@@ -190,69 +169,48 @@ class PairDateset(torch.utils.data.Dataset):
         return x1_sample, x2_sample
     def __len__(self):
         return self.x1.__len__()
+
+class ImageDataset(torch.utils.data.Dataset):
+    def __init__(self, img_pths):
+        super().__init__()
+        self.files = img_pths
+        # self.mean = [0.485, 0.456, 0.406]
+        # self.std = [0.229, 0.224, 0.225]
+        self.transforms = transforms.Compose([
+            # transforms.RandomResizedCrop(size=(224, 168), scale=(0.5, 1.0)),
+            transforms.ToTensor(),
+            # transforms.Normalize(mean=self.mean, std=self.std),
+        ])
+
+    def __len__(self):
+        return len(self.files)
     
+    def __getitem__(self, index):
+        file = self.files[index]
+        if len(file) == 2:
+            img0 = Image.open(file[0]).convert('RGB')
+            img_ts0 = self.transforms(img0)
 
-class res_conv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1):
-        super(res_conv, self).__init__()
-        self.conv_bn_relu_1 = nn.Sequential(
-            nn.BatchNorm2d(in_channels),
-            nn.ReLU(),
-            nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding='same', bias=False))
-        self.skip_1 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, padding='same')
-        )
-        self.conv_bn_relu_2 = nn.Sequential(
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(),
-            nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding='same', bias=False),
-        ) 
-        self.skip_2 = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, kernel_size=1, padding='same', bias=False)
-        )
-        
-    def forward(self, x):
-        x_skip = x
+            img1 = Image.open(file[1]).convert('RGB')
+            img_ts1 = self.transforms(img1)
 
-        x = self.conv_bn_relu_1(x)
-        x_skip = self.skip_1(x_skip)
-        x = self.conv_bn_relu_2(x)
-        x_skip = self.skip_2(x_skip)
-        return x + x_skip
-    
-class Decoder(nn.Module):
-    def __init__(self, input_shape) -> None:
-        super(Decoder, self).__init__()
+            return img_ts0, img_ts1
 
-        feature_channels = input_shape[0]
+        else:
+            img = Image.open(file).convert('RGB')
+            img_ts = self.transforms(img)
+            return img_ts
 
-        self.decoder = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            # doubleconv(feature_channels, feature_channels // 2),
-            res_conv(feature_channels, feature_channels // 2),
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            # doubleconv(feature_channels // 2, feature_channels // 4),
-            res_conv(feature_channels // 2, feature_channels // 4)
-            # nn.Upsample(scale_factor=2, mode='nearest'),
-            # doubleconv(feature_channels // 4, feature_channels // 8),
-        )
-        # self.out_conv = convbnrelu_2d(feature_channels // 4, 3)
-        self.out_conv = res_conv(feature_channels // 4, 3)
-        # self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        
-        feature_x = self.decoder(x)
-        out_x = self.out_conv(feature_x)
-        
-        return out_x
-        
+def load_data(dataloader):
+    while True:
+        yield from dataloader  
 
 class Trainer(object):
     def __init__(self, args=None):
         self.args = args
         
         self.n_epochs = args.n_epochs
+        self.data_root = args.data_root
         
         self.input_size = args.input_size
         self.n_flows=args.n_flows
@@ -260,31 +218,34 @@ class Trainer(object):
         self.hidden_ratio=args.hidden_ratio
         self.clamp=args.clamp
 
-        self.lr_init = args.lr_init
+        self.img_type_1 = args.img_type_1
+        self.img_type_2 = args.img_type_2
+
         self.lr_t = args.lr_t
         self.lr_b = args.lr_b
         self.weight_decay=args.weight_decay
 
         self.batch_size_tr = args.batch_size_tr
         self.batch_size_ts = args.batch_size_ts
+        self.n_batch = args.n_batch
+        self.unbalanced_num = args.unbalanced_num
 
         self.weight_ot = args.weight_ot
+        self.ckpt = args.ckpt
+        self.ckpt_epoch = args.ckpt_epoch
 
         self.device = torch.device('cuda', index=0)
     
     def initilize(self):
 
-        # self.encoder = timm.create_model('wide_resnet50_2', features_only=True, pretrained=True).to(self.device)
-        # self.decoder_t1 = Decoder(input_shape=(256, int(self.input_size[0] // 8), int(self.input_size[1] // 8))).to(self.device)
-        # self.decoder_t2 = Decoder(input_shape=(256, int(self.input_size[0] // 8), int(self.input_size[1] // 8))).to(self.device)
-
         self.vqvae_t1 = VQVAE().to(self.device)
         self.vqvae_t2 = VQVAE().to(self.device)
 
-        self.vqvae_t1.load_state_dict(torch.load('utils/Task_009_pelvis/vqvae_results_ct_1.pth'), strict=True)
-        self.vqvae_t2.load_state_dict(torch.load('utils/Task_009_pelvis/vqvae_results_mr_1.pth'), strict=True)
-        # self.vqvae_t1.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_ct_1.pth'), strict=True)
-        # self.vqvae_t2.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_mr_1.pth'), strict=True)
+       
+        self.vqvae_t1.load_state_dict(torch.load('utils/Task_003_CT_MRI_Brain/vqvae_results_ct_1.pth'), strict=True)
+        self.vqvae_t2.load_state_dict(torch.load('utils/Task_003_CT_MRI_Brain/vqvae_results_mri_1.pth'), strict=True)
+
+        print('Successfully Loaded VQ-VAE-2!')
 
         for p_1, p_2 in zip(self.vqvae_t1.parameters(), self.vqvae_t2.parameters()):
             p_1.requires_grad = False
@@ -294,17 +255,15 @@ class Trainer(object):
         self.vqvae_t2.eval()
 
         self.nf_flow_t  = nf_flow(
-            # input_size=(256, int(self.input_size[0] // 8), int(self.input_size[1] // 8)),
             input_size = (128, 28, 21), # /8
             n_flows=self.n_flows,
             conv3x3_only=self.conv3x3_only,
             hidden_ratio=self.hidden_ratio,
             clamp=self.clamp
         ).to(self.device)
-        # self.nf_flow.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231113-091855/params/nf_flow_ckpt_best_for_train.pth'), strict=True)
+        
 
         self.nf_flow_b  = nf_flow(
-            # input_size=(256, int(self.input_size[0] // 8), int(self.input_size[1] // 8)),
             input_size = (128, 56, 42), # /4
             n_flows=self.n_flows,
             conv3x3_only=self.conv3x3_only,
@@ -312,54 +271,46 @@ class Trainer(object):
             clamp=self.clamp
         ).to(self.device)
 
-        
+        # random.seed(47129)
+        self._data_tr_1 = files_sort(glob(os.path.join(self.data_root, 'Train', self.img_type_1, '*.png')))
+        self._data_tr_2 = files_sort(glob(os.path.join(self.data_root, 'Train', self.img_type_2, '*.png')))
 
-        # print('------------------ Loading params --------------------------------')
-        # # self.nf_flow.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231118-191931/params/nf_flow_ckpt_1299.pth'), strict=True)
-        # self.nf_flow_t.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231121-234003/params/nf_flow_ckpt_cur_t.pth'), strict=True)
-        # self.nf_flow_b.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231121-234003/params/nf_flow_ckpt_cur_b.pth'), strict=True)
-        # # # self.nf_flow_t.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231115-160113/params/nf_flow_ckpt_1000_t.pth'), strict=True)
-        # # # self.nf_flow_b.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231115-160113/params/nf_flow_ckpt_1000_b.pth'), strict=True)
-        # # # self.nf_flow_t.load_state_dict(torch.load('mmd_results_Task_009_Pelvis/20231116-231648/params/nf_flow_ckpt_999_t.pth'), strict=True)
-        # # # self.nf_flow_b.load_state_dict(torch.load('mmd_results_Task_009_Pelvis/20231116-231648/params/nf_flow_ckpt_999_b.pth'), strict=True)
-        # print('------------------- Loaded Successfully ---------------------------')
+        print(f'Length of {self.img_type_1}: {len(self._data_tr_1)}, Length of {self.img_type_2}: {len(self._data_tr_2)}')
 
-        # self._ds_source_train = CTMRDataset(img_type='CT', train=1)
-        # self._ds_target_train = CTMRDataset(img_type='MR', train=1)
+        self._ds_tr_1 = CTMRDataset(root=self.data_root, img_type='CT', train=1)
+        self._ds_tr_2 = CTMRDataset(root=self.data_root, img_type='MRI', train=1)
 
-        # self._ds_source_test = CTMRDataset(img_type='CT', train=0)
-        # self._ds_target_test = CTMRDataset(img_type='MR', train=0)
-        
-        self._ds_source_train = PelvisDataset(img_type='CT', train=1)
-        self._ds_target_train = PelvisDataset(img_type='MR', train=1)
+        self._dl_tr_1 = DataLoader(self._ds_tr_1, batch_size=self.batch_size_tr, shuffle=True, drop_last=True)
+        self._dl_tr_2 = DataLoader(self._ds_tr_2, batch_size=self.batch_size_tr, shuffle=True, drop_last=True)
 
-        self._ds_source_test = PelvisDataset(img_type='CT', train=0)
-        self._ds_target_test = PelvisDataset(img_type='MR', train=0)
+        self._dg_tr_1 = load_data(self._dl_tr_1)
+        self._dg_tr_2 = load_data(self._dl_tr_2)
 
-
-        self._ds_train = PairDateset(self._ds_source_train, self._ds_target_train)
-        self._dl_train = DataLoader(self._ds_train, batch_size=self.batch_size_tr, shuffle=True, drop_last=True)
+       
+        self._ds_source_test = CTMRDataset(root=self.data_root, img_type='CT', train=0)
+        self._ds_target_test = CTMRDataset(root=self.data_root, img_type='MRI', train=0)
 
         self._ds_test = PairDateset(self._ds_source_test, self._ds_target_test)
-        self._dl_test = DataLoader(self._ds_test, batch_size=30, shuffle=False, drop_last=True)
+        self._dl_test = DataLoader(self._ds_test, batch_size=self.batch_size_ts, shuffle=False, drop_last=False)
+        self._dg_test = load_data(self._dl_test)
+
+        if self.n_batch == -1:
+            # self.n_batch_tr = min(len(self._dl_tr_1), len(self._dl_tr_2))
+            self.n_batch_tr = len(self._dl_tr)
+        else:
+            self.n_batch_tr = self.n_batch
 
         self.optimizer_t = torch.optim.AdamW(self.nf_flow_t.parameters(), lr=self.lr_t, weight_decay=self.weight_decay, betas=(0.9, 0.999))
         self.optimizer_b = torch.optim.AdamW(self.nf_flow_b.parameters(), lr=self.lr_b, weight_decay=self.weight_decay, betas=(0.9, 0.999))
-        # self.optimizer = torch.optim.SGD(self.nf_flow.parameters(), lr=self.lr_init, weight_decay=self.weight_decay, momentum=0.99, nesterov=True)
+
         self.lr_schedular_t = PolyLRScheduler(self.optimizer_t, self.lr_t, self.n_epochs)
         self.lr_schedular_b = PolyLRScheduler(self.optimizer_b, self.lr_b, self.n_epochs)
-        # self.lr_schedular = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.995)
-        # self.optimizer = torch.optim.AdamW(self.nf_flow.parameters(), lr=self.lr_init, weight_decay=self.weight_decay, betas=(0.9, 0.999))
-        # self.lr_schedular = PolyLRScheduler(self.optimizer, self.lr_init, self.n_epochs)
 
         self.loss_avg_train = AverageCounter()
         self.loss_avg_test = AverageCounter()
 
-        self.best_train_loss = np.inf
-
         self.loss_of_training = np.zeros(self.n_epochs, )
         self.loss_of_test = np.zeros(self.n_epochs, )
-
         self.lr_list = np.zeros(self.n_epochs, )
 
     def build_result_pth(self):
@@ -376,7 +327,7 @@ class Trainer(object):
 
         self.img_t1_dir = os.path.join(self.output_dir, 'CT')
         os.makedirs(self.img_t1_dir, exist_ok=True)
-        self.img_t2_dir = os.path.join(self.output_dir, 'MR')
+        self.img_t2_dir = os.path.join(self.output_dir, 'MRI')
         os.makedirs(self.img_t2_dir, exist_ok=True)
         self.param = os.path.join(self.output_dir, 'params')
         os.makedirs(self.param, exist_ok=True)
@@ -390,20 +341,24 @@ class Trainer(object):
         self.initilize()
         self.build_result_pth()
 
+        if self.ckpt:
+            self.nf_flow_b.load_state_dict(torch.load(os.path.join('./mmd_results_' + str(args.task_name), self.ckpt, 'params', f'nf_flow_b_ckpt_{self.ckpt_epoch}.pth')))
+            self.nf_flow_t.load_state_dict(torch.load(os.path.join('./mmd_results_' + str(args.task_name), self.ckpt, 'params', f'nf_flow_t_ckpt_{self.ckpt_epoch}.pth')))
+            self.logger.append(f'Successfully Loaded NF params of {self.ckpt} with epoch {self.ckpt_epoch}!')
+
+        self.ema_t = EMA(self.nf_flow_t, decay=0.99)
+        self.ema_b = EMA(self.nf_flow_b, decay=0.99)
+
         for epoch in range(self.n_epochs):
-            self.loss_avg_train.restart()
+            start_time = time.time()
             self.logger.append('-'*50)
             self.loss_of_training[epoch], img_t1_for_save_tr, img_t2_for_save_tr = self.train_one_epoch(epoch)
             self.loss_of_test[epoch], img_t1_for_save_ts, img_t2_for_save_ts = self.test_one_epoch(epoch)
             if self.args.use_lr_schedular:
                 self.lr_schedular_t.step(epoch + 1)
                 self.lr_schedular_b.step(epoch + 1)
-                # self.lr_schedular.step(epoch + 1)
             self.lr_list[epoch] = self.optimizer_b.param_groups[0]['lr']
-            # if (epoch + 1) % 100 == 0:
-            #     # torch.save(self.nf_flow.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_ckpt_' + str(epoch) + '.pth'))
-            #     torch.save(self.nf_flow_t.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_ckpt_' + str(epoch) + '_t.pth'))
-            #     torch.save(self.nf_flow_b.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_ckpt_' + str(epoch) + '_b.pth'))
+
             torch.save(self.nf_flow_t.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_ckpt_cur_t.pth'))
             torch.save(self.nf_flow_b.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_ckpt_cur_b.pth'))
             self.draw_training_and_test_loss(epoch)
@@ -411,55 +366,60 @@ class Trainer(object):
             if epoch % 10 == 0:
                 torchvision.utils.save_image(torch.concat([img_t1_for_save_tr, img_t1_for_save_ts]), os.path.join(self.img_t1_dir, 'img_' + str(epoch) + '.png'), nrow=10)  
                 torchvision.utils.save_image(torch.concat([img_t2_for_save_tr, img_t2_for_save_ts]), os.path.join(self.img_t2_dir, 'img_' + str(epoch) + '.png'), nrow=10) 
-            # if epoch % 500 == 0:
-            #     torch.save(self.nf_flow.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_ckpt_' + str(epoch) + '.pth'))
+            if epoch % 100 == 0 or epoch == self.n_epochs - 1:
+                torch.save(self.nf_flow_t.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_t_ckpt_' + str(epoch) + '.pth'))
+                torch.save(self.nf_flow_b.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_b_ckpt_' + str(epoch) + '.pth'))
+            self.logger.append(f'Epoch: {epoch}, Total time cost: {time.time() - start_time} sec')
 
     def train_one_epoch(self, epoch):
-        # self.nf_flow_t.train()
-        # self.nf_flow_b.train()
-        self.loss_avg_train.restart()
-        for img_t1, img_t2 in self._dl_train:
-        # for (img_t1, img_t2)in zip(self._dl_source_train, self._dl_target_train):
-            img_t1, img_t2 = img_t1.to(self.device), img_t2.to(self.device)
 
-            # f_t1 = self.encoder(img_t1)[-4]
-            # f_t2 = self.encoder(img_t2)[-4]
+        self.nf_flow_t.train()
+        self.nf_flow_b.train()
+
+        self.loss_avg_train.restart()
+        for _ in range(self.n_batch_tr):
+            img_t1 = next(self._dg_tr_1)
+            img_t2 = next(self._dg_tr_2)
+
+            img_t1, img_t2 = img_t1.to(self.device), img_t2.to(self.device)
 
             f_t1_t, f_t1_b = self.vqvae_t1.encode_1(img_t1)
             f_t2_t, f_t2_b = self.vqvae_t2.encode_1(img_t2)
 
+            # print(f_t1_t.shape)
             f_t2_fake, _ = self.nf_flow_t(f_t1_t)
             f_t1_fake, _ = self.nf_flow_t(f_t2_t, rev=True)
 
             f_t1_ft, f_t2_ft, f_t1_fake_ft, f_t2_fake_ft = flatten(f_t1_t), flatten(f_t2_t), flatten(f_t1_fake), flatten(f_t2_fake)
             loss_mmd = mmd(f_t1_ft, f_t1_fake_ft, kernel_mul=2, kernel_num=10) + mmd(f_t2_ft, f_t2_fake_ft, kernel_mul=2, kernel_num=10)
-            penalty_ot = 0.5 * torch.mean((f_t1_ft - f_t2_fake_ft) ** 2) + 0.5 * torch.mean((f_t2_ft - f_t1_fake_ft) ** 2)
+            penalty_ot = 0.5 * torch.mean((f_t1_ft - f_t1_fake_ft) ** 2) + 0.5 * torch.mean((f_t2_ft - f_t2_fake_ft) ** 2)
+            penalty_l1 = torch.mean(torch.abs(f_t1_ft - f_t1_fake_ft)) + torch.mean(torch.abs(f_t2_ft - f_t2_fake_ft))
             loss_t = loss_mmd + self.weight_ot * penalty_ot
 
             self.optimizer_t.zero_grad()
             loss_t.backward()
             self.optimizer_t.step()
-
-            # ------------------------------------------------------------
+            self.ema_t.update()
 
             f_t2_fake, _ = self.nf_flow_b(f_t1_b)
             f_t1_fake, _ = self.nf_flow_b(f_t2_b, rev=True)
 
             f_t1_ft, f_t2_ft, f_t1_fake_ft, f_t2_fake_ft = flatten(f_t1_b), flatten(f_t2_b), flatten(f_t1_fake), flatten(f_t2_fake)
             loss_mmd = mmd(f_t1_ft, f_t1_fake_ft, kernel_mul=2, kernel_num=10) + mmd(f_t2_ft, f_t2_fake_ft, kernel_mul=2, kernel_num=10)
-            penalty_ot = 0.5 * torch.mean((f_t1_ft - f_t2_fake_ft) ** 2) + 0.5 * torch.mean((f_t2_ft - f_t1_fake_ft) ** 2)
+            penalty_ot = 0.5 * torch.mean((f_t1_ft - f_t1_fake_ft) ** 2) + 0.5 * torch.mean((f_t2_ft - f_t2_fake_ft) ** 2)
+            penalty_l1 = torch.mean(torch.abs(f_t1_ft - f_t1_fake_ft)) + torch.mean(torch.abs(f_t2_ft - f_t2_fake_ft))
             loss_b = loss_mmd + self.weight_ot * penalty_ot
 
             self.optimizer_b.zero_grad()
             loss_b.backward()
             self.optimizer_b.step()
+            self.ema_b.update()
 
             loss = 0.5 * (loss_t + loss_b)
 
             self.loss_avg_train.addval(loss.cpu().detach().item())
 
         self.logger.append(f'[Training] Epoch: {epoch}, Training Loss: {self.loss_avg_train.getmean:.6f}')
-
 
         with torch.no_grad():
             f_t1_t, f_t1_b = self.vqvae_t1.encode_1(img_t1)
@@ -480,33 +440,21 @@ class Trainer(object):
             img_t2_ae = self.vqvae_t2.decode_1(f_t2_t.detach(), f_t2_b.detach())
             img_t2_fake = self.vqvae_t2.decode_1(f_t2_fake_t.detach(), f_t2_fake_b.detach())
 
-
-            # f_t1 = self.ae_t1.encode(img_t1)
-            # f_t2 = self.ae_t2.encode(img_t2)
-
-            # f_t2_fake, _ = self.nf_flow(f_t1)
-            # f_t1_fake, _ = self.nf_flow(f_t2, rev=True)
-
-            # img_t1_ae = self.ae_t1.decode(f_t1)
-            # img_t1_fake = self.ae_t1.decode(f_t1_fake)
-            # img_t2_ae = self.ae_t2.decode(f_t2)
-            # img_t2_fake = self.ae_t2.decode(f_t2_fake)
-        
-
         # if epoch % 10 == 0:
             img_t1_for_save = torch.concat([img_t1_ae[:10].cpu(), img_t1_fake[:10].cpu()], dim=0)
                 # torchvision.utils.save_image(img_t1_for_save, os.path.join(self.img_t1_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show)  
             img_t2_for_save = torch.concat([img_t2_ae[:10].cpu(), img_t2_fake[:10].cpu()], dim=0)
-            # torchvision.utils.save_image(img_t2_for_save, os.path.join(self.img_t2_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show) 
-        
+
 
         return self.loss_avg_train.getmean, img_t1_for_save, img_t2_for_save
     
     def test_one_epoch(self, epoch):
         with torch.no_grad():
             self.loss_avg_test.restart()
-            for img_t1, img_t2 in self._dl_test:
-            # for img_t1, img_t2 in zip(self._dl_source_test, self._dl_target_test):
+            self.ema_t.apply_shadow()
+            self.ema_b.apply_shadow()
+            for i in range(10):
+                img_t1, img_t2 = next(self._dg_test)
                 img_t1, img_t2 = img_t1.to(self.device), img_t2.to(self.device)
 
                 f_t1_t, f_t1_b = self.vqvae_t1.encode_1(img_t1)
@@ -543,14 +491,13 @@ class Trainer(object):
                 self.loss_avg_test.addval(loss.cpu().detach().item())
 
         self.logger.append(f'[Test] Epoch: {epoch}, Test Loss: {self.loss_avg_test.getmean:.6f}')
-                
-
-        # if epoch % 10 == 0:
-        img_t1_for_save = torch.concat([img_t1_ae[:10].cpu(), img_t1_fake[:10].cpu()], dim=0)
-            # torchvision.utils.save_image(img_t1_for_save, os.path.join(self.img_t1_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show)  
-        img_t2_for_save = torch.concat([img_t2_ae[:10].cpu(), img_t2_fake[:10].cpu()], dim=0)
-            # torchvision.utils.save_image(img_t2_for_save, os.path.join(self.img_t2_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show) 
         
+        img_t1_for_save = torch.concat([img_t1_ae[:10].cpu(), img_t1_fake[:10].cpu()], dim=0)
+        img_t2_for_save = torch.concat([img_t2_ae[:10].cpu(), img_t2_fake[:10].cpu()], dim=0)
+
+        self.ema_t.restore()
+        self.ema_b.restore()
+
         return self.loss_avg_test.getmean, img_t1_for_save, img_t2_for_save
 
     def draw_training_and_test_loss(self, epoch):
@@ -560,7 +507,6 @@ class Trainer(object):
         ax = ax_all[0]
         ax.plot(xvalues, self.loss_of_training[:epoch+1], color='b', ls='-', label='loss_tr', linewidth=2)
         ax.plot(xvalues, self.loss_of_test[:epoch+1], color='r', ls='-', label='loss_ts', linewidth=2)
-
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss')
         ax.legend(loc=(0, 1))
@@ -574,47 +520,6 @@ class Trainer(object):
         fig.savefig(os.path.join(self.output_dir, 'process.png'))
         plt.close()
 
-    def train_ae(self, img_type='CT'):
-        output_dir = 'ae_results_' + self.args.task_name
-        os.makedirs(output_dir, exist_ok=True)
-        ckpt_dir = os.path.join('utils', self.args.task_name)
-        os.makedirs(ckpt_dir, exist_ok=True)
-
-        ds = CTMRDataset(img_type=img_type, train=-1)
-        dl = DataLoader(ds, batch_size=64, shuffle=True, drop_last=True)
-
-        net = AutoEncoder(
-            in_channel=1
-        ).to(self.device)
-
-        optimizer = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-5)
-        loss_func = torch.nn.MSELoss()
-
-
-        l_count = AverageCounter()
-        for epoch in range(1, 501):
-            l_count.restart()
-            net.train()
-            for data in dl:
-                data = data.to(self.device)
-                fake_data = net(data)
-                
-                loss = loss_func(fake_data, data)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                l_count.addval(loss.detach().cpu().item())
-
-            if epoch % 100 == 0:
-                net.eval()
-                with torch.no_grad():
-                    data = data[:10]
-                    dec = net(data)
-                    img_for_save = torch.concat([data[:10], dec[:10]], dim=0)
-                    torchvision.utils.save_image(img_for_save.cpu(), output_dir + '/img_' + str(epoch) + '.png', nrow=10)
-                    torch.save(net.state_dict(), os.path.join(output_dir, 'ae_results_' + img_type.lower() + '_' + str(epoch) + '_128.pth'))
-            print(f'[Epoch: {epoch}], loss: {l_count.getmean:.6f}')
 
     
     def train_vqvae(self, img_type='CT'):
@@ -623,23 +528,23 @@ class Trainer(object):
         ckpt_dir = os.path.join('utils', self.args.task_name)
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        # ds = CTMRDataset(img_type=img_type, train=-1)
-        ds = PelvisDataset(img_type=img_type, train=-1)
-        dl = DataLoader(ds, batch_size=100, shuffle=True, drop_last=True)
+        ds = CTMRDataset(root='/home/xiongz/programs/data/Task_003_CT_MRI_Brain_1', img_type=img_type, train=-1)
+        print(f'Length of dataset: {ds.__len__()}')
+        # ds = PelvisDataset(img_type=img_type)
+        dl = DataLoader(ds, batch_size=64, shuffle=True, drop_last=True)
 
         net = VQVAE(
         ).to(self.device)
-
-        # net.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_mr_0.pth'), strict=True)
+        # net.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_ct_res_1.pth'), strict=True)
         # net.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_ct_res.pth'), strict=True)
-        net.load_state_dict(torch.load('utils/Task_009_pelvis/vqvae_results_mr_0.pth'), strict=True)
+        # net.load_state_dict(torch.load('utils/Task_009_Pelvis/vqvae_2_results_mr_res_1.pth'), strict=True)
         optimizer = torch.optim.AdamW(net.parameters(), lr=1e-4, weight_decay=1e-5)
         loss_func = torch.nn.MSELoss()
 
-        # l_count = AverageCounter()
-        for epoch in range(0, 1001):
+        l_count = AverageCounter()
+        for epoch in range(500):
             net.train()
-            l_count = AverageCounter()
+            l_count.restart()
             for data in dl:
                 net.zero_grad()
                 data = data.to(self.device)
@@ -652,7 +557,7 @@ class Trainer(object):
                 recon_loss = loss_func(dec, data)
                 latent_loss = diff.mean()
 
-                loss = recon_loss + .5 * latent_loss
+                loss = recon_loss + 2. * latent_loss
 
                 loss.backward()
                 optimizer.step()
@@ -670,12 +575,17 @@ class Trainer(object):
         torch.save(net.state_dict(), os.path.join(ckpt_dir, 'vqvae_results_' + img_type.lower() + '_1.pth'))
 
 
+    
+    
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--task_name', type=str, default='Task_009_pelvis')
+    parser = argparse.ArgumentParser(description='MMD for MRI between T1 and T2')
+    parser.add_argument('--data_root', type=str, default='/home/xiongz/programs/data/Task_003_CT_MRI_Brain_1')
+    parser.add_argument('--task_name', type=str, default='Task_010_CT_MRI_Brain')
+    parser.add_argument('--img_type_1', type=str, default='CT')
+    parser.add_argument('--img_type_2', type=str, default='MRI')
 
-    parser.add_argument('--input_size', type=tuple, default=((256, 400)))
+    parser.add_argument('--input_size', type=tuple, default=((192,192)))
     parser.add_argument('--n_flows', type=int, default=8)
     parser.add_argument('--conv3x3_only', type=bool, default=False)
     parser.add_argument('--hidden_ratio', type=float, default=1.)
@@ -684,23 +594,28 @@ if __name__ == '__main__':
 
     parser.add_argument('--lr_init', type=float, default=5e-3)
     parser.add_argument('--lr_t', type=float, default=1e-3)
-    parser.add_argument('--lr_b', type=float, default=1e-4)
+    parser.add_argument('--lr_b', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
 
-    parser.add_argument('--batch_size_tr', type=int, default=64)
-    parser.add_argument('--batch_size_ts', type=int, default=100)
-    # parser.add_argument('--gpu_idx', type=int, default=0)
+    parser.add_argument('--ckpt_epoch', type=int, default=999)
+    parser.add_argument('--ckpt', type=str, default='')
+
+    parser.add_argument('--batch_size_tr', type=int, default=24)
+    parser.add_argument('--batch_size_ts', type=int, default=24)
+    parser.add_argument('--n_batch', type=int, default=-1)
+    parser.add_argument('--unbalanced_num', type=int, default=500)
+    parser.add_argument('--gpu_idx', type=int, default=0)
     parser.add_argument('--use_lr_schedular', default=False, action='store_true')
-    parser.add_argument('--weight_ot', type=float, default=1e-2)
+
+    parser.add_argument('--weight_ot', default=1e-2, type=float)
 
     args = parser.parse_args()
     # os.environ['CUDA_VISIBLE_DEVICES']=str(args.gpu_idx)
     mmd_trainer = Trainer(args=args)
 
-    # mmd_trainer.train_ae(img_type='CT')
     # mmd_trainer.train_ae(img_type='MR')
     # mmd_trainer.train_vqvae(img_type='CT')
-    # mmd_trainer.train_vqvae(img_type='MR')
+    # mmd_trainer.train_vqvae(img_type='MRI')
     mmd_trainer.train_process()
     
     

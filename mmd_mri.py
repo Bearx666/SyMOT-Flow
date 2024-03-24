@@ -281,41 +281,12 @@ class MMDMRITrainer(object):
         self.device = torch.device('cuda', index=0)
     
     def initilize(self):
-        # this part should be put into the initial function
-        # self.encoder = timm.create_model('wide_resnet50_2', features_only=True, pretrained=True).to(self.device)
-        # self.decoder_t1 = Decoder(input_shape=(256, 48, 48)).to(self.device)
-        # self.decoder_t2 = Decoder(input_shape=(256, 48, 48)).to(self.device)
-
-        # # for p_e in self.encoder.parameters():
-        # #     p_e.requires_grad = False
-        # for p_e, p_d_t1, p_d_t2 in zip(self.encoder.parameters(), self.decoder_t1.parameters(), self.decoder_t2.parameters()):
-        #     p_e.requires_grad = False
-        #     p_d_t1.requires_grad = False
-        #     p_d_t2.requires_grad = False
         
-        # pretrained_decoder_t1_param = np.load('./utils/Task_002_MRI/decoder_mri_t1_hist.npy', allow_pickle=True).item()
-        # pretrained_decoder_t2_param = np.load('./utils/Task_002_MRI/decoder_mri_t2_hist.npy', allow_pickle=True).item()
-        # self.decoder_t1.load_state_dict(pretrained_decoder_t1_param['decoder_param'], strict=True)
-        # self.decoder_t2.load_state_dict(pretrained_decoder_t2_param['decoder_param'], strict=True)
-
-        # self.nf_flow = nf_flow(
-        #     input_size=(256, 48, 48),
-        #     n_flows=self.n_flows,
-        #     conv3x3_only=self.conv3x3_only,
-        #     hidden_ratio=self.hidden_ratio,
-        #     clamp=self.clamp
-        # ).to(self.device)
         self.vqvae_t1 = VQVAE().to(self.device)
         self.vqvae_t2 = VQVAE().to(self.device)
 
-        # self.vqvae_t1.load_state_dict(torch.load('vqvae_results_Task_002_MRI_T1_T2/vqvae_new_t1_1.pth'), strict=True)
-        # self.vqvae_t2.load_state_dict(torch.load('vqvae_results_Task_002_MRI_T1_T2/vqvae_new_t2_1.pth'), strict=True)
-
         self.vqvae_t1.load_state_dict(torch.load('vqvae_results_Task_002_MRI_T1_T2/vqvae_conv_t1_1.pth'), strict=True)
         self.vqvae_t2.load_state_dict(torch.load('vqvae_results_Task_002_MRI_T1_T2/vqvae_conv_t2_1.pth'), strict=True)
-
-        # self.vqvae_t1.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_ct_1.pth'), strict=True)
-        # self.vqvae_t2.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_mr_1.pth'), strict=True)
 
         for p_1, p_2 in zip(self.vqvae_t1.parameters(), self.vqvae_t2.parameters()):
             p_1.requires_grad = False
@@ -342,12 +313,6 @@ class MMDMRITrainer(object):
             hidden_ratio=self.hidden_ratio,
             clamp=self.clamp
         ).to(self.device)
-
-        # print('------------------ Loading params --------------------------------')
-        # self.nf_flow_t.load_state_dict(torch.load('mmd_results_Task_002_MRI_T1_T2/20231129-141628/params/nf_flow_t_ckpt_200.pth'), strict=True)
-        # self.nf_flow_b.load_state_dict(torch.load('mmd_results_Task_002_MRI_T1_T2/20231129-141628/params/nf_flow_b_ckpt_200.pth'), strict=True)
-        # print('------------------- Loaded Successfully ---------------------------')
-        # print(f'# of training parameters: {sum([p.numel() for p in self.nf_flow.parameters() if p.requires_grad == True])}')
 
         self._ds_source_train = MRIDataset(train=1, img_type='T1')
         self._ds_target_train = MRIDataset(train=1, img_type='T2')
@@ -571,88 +536,7 @@ class MMDMRITrainer(object):
             # torchvision.utils.save_image(img_t2_for_save, os.path.join(self.img_t2_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show) 
         
         return self.loss_avg_test.getmean, img_t1_for_save, img_t2_for_save
-
-    # def train_one_epoch(self, epoch):
-    #     self.nf_flow.train()
-    #     for img_t1, img_t2 in self._dl_train:
-    #     # for (img_t1, img_t2)in zip(self._dl_source_train, self._dl_target_train):
-    #         img_t1, img_t2 = img_t1.to(self.device), img_t2.to(self.device)
-    #         f_t1 = self.encoder(img_t1)[-4]
-    #         f_t2 = self.encoder(img_t2)[-4]
-
-    #         f_t2_fake, _ = self.nf_flow(f_t1)
-    #         f_t1_fake, _ = self.nf_flow(f_t2, rev=True)
-
-    #         f_t1_ft, f_t2_ft, f_t1_fake_ft, f_t2_fake_ft = flatten(f_t1), flatten(f_t2), flatten(f_t1_fake), flatten(f_t2_fake)
-    #         loss_mmd = mmd(f_t1_ft, f_t1_fake_ft, kernel_mul=2, kernel_num=10) + mmd(f_t2_ft, f_t2_fake_ft, kernel_mul=2, kernel_num=10)
-
-    #         penalty_ot = 0.5 * torch.mean((f_t1_ft - f_t2_fake_ft) ** 2) + 0.5 * torch.mean((f_t2_ft - f_t1_fake_ft) ** 2)
-    #         loss_mmd = loss_mmd + self.weight_of_ot * penalty_ot
-             
-    #         self.optimizer.zero_grad()
-    #         loss_mmd.backward()
-    #         self.optimizer.step()
-
-    #         self.loss_avg_train.addval(loss_mmd.cpu().detach().item())
-
-    #     self.logger.append(f'[Training] Epoch: {epoch}, Training Loss: {self.loss_avg_train.getmean:.6f}')
-
-    #     if self.best_train_loss > self.loss_avg_train.getmean:
-    #         self.best_train_loss = self.loss_avg_train.getmean
-    #         torch.save(self.nf_flow.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_ckpt_best_for_train.pth'))
-    #         self.logger.append(f'Best [training] parameters are refreshed on [Epoch:{epoch}]')
-
-    #     img_t1_ae = self.decoder_t1(f_t1.detach())
-    #     img_t1_fake = self.decoder_t1(f_t1_fake.detach())
-    #     img_t2_ae = self.decoder_t2(f_t2.detach())
-    #     img_t2_fake = self.decoder_t2(f_t2_fake.detach())
-
-    #     # if epoch % 10 == 0:
-    #     img_t1_for_save = torch.concat([img_t1_ae[:5].cpu(), img_t1_fake[:5].cpu()], dim=0)
-    #         # torchvision.utils.save_image(img_t1_for_save, os.path.join(self.img_t1_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show)  
-    #     img_t2_for_save = torch.concat([img_t2_ae[:5].cpu(), img_t2_fake[:5].cpu()], dim=0)
-    #         # torchvision.utils.save_image(img_t2_for_save, os.path.join(self.img_t2_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show) 
-        
-
-    #     return self.loss_avg_train.getmean, img_t1_for_save, img_t2_for_save
     
-    # def test_one_epoch(self, epoch):
-    #     self.nf_flow.eval()
-    #     for img_t1, img_t2 in self._dl_test:
-    #     # for img_t1, img_t2 in zip(self._dl_source_test, self._dl_target_test):
-    #         img_t1, img_t2 = img_t1.to(self.device), img_t2.to(self.device)
-    #         f_t1 = self.encoder(img_t1)[-4]
-    #         f_t2 = self.encoder(img_t2)[-4]
-    #         f_t2_fake, _ = self.nf_flow(f_t1)
-    #         f_t1_fake, _ = self.nf_flow(f_t2, rev=True)
-
-    #         f_t1_ft, f_t2_ft, f_t1_fake_ft, f_t2_fake_ft = flatten(f_t1), flatten(f_t2), flatten(f_t1_fake), flatten(f_t2_fake)
-    #         loss_mmd = mmd(f_t1_ft, f_t1_fake_ft, kernel_mul=2, kernel_num=10) + mmd(f_t2_ft, f_t2_fake_ft, kernel_mul=2, kernel_num=10)
-
-    #         penalty_ot = 0.5 * torch.mean((f_t1_ft - f_t2_fake_ft) ** 2) + 0.5 * torch.mean((f_t2_ft - f_t1_fake_ft) ** 2)
-    #         loss_mmd = loss_mmd + self.weight_of_ot * penalty_ot
-
-    #         self.loss_avg_test.addval(loss_mmd.cpu().detach().item())
-
-    #     self.logger.append(f'[Testing] Epoch: {epoch}, Test Loss: {self.loss_avg_test.getmean:.6f}')
-    #     if self.best_test_loss > self.loss_avg_test.getmean:
-    #         self.best_test_loss = self.loss_avg_test.getmean
-    #         torch.save(self.nf_flow.state_dict(), os.path.join(self.output_dir, 'params', 'nf_flow_ckpt_best_for_test.pth'))
-    #         self.logger.append(f'Best [Test] parameters are refreshed on [Epoch:{epoch}]')
-
-    #     img_t1_ae = self.decoder_t1(f_t1.detach())
-    #     img_t1_fake = self.decoder_t1(f_t1_fake.detach())
-    #     img_t2_ae = self.decoder_t2(f_t2.detach())
-    #     img_t2_fake = self.decoder_t2(f_t2_fake.detach())
-
-    #     # if epoch % 10 == 0:
-    #     img_t1_for_save = torch.concat([img_t1_ae[:5].cpu(), img_t1_fake[:5].cpu()], dim=0)
-    #         # torchvision.utils.save_image(img_t1_for_save, os.path.join(self.img_t1_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show)  
-    #     img_t2_for_save = torch.concat([img_t2_ae[:5].cpu(), img_t2_fake[:5].cpu()], dim=0)
-    #         # torchvision.utils.save_image(img_t2_for_save, os.path.join(self.img_t2_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show) 
-        
-    #     return self.loss_avg_test.getmean, img_t1_for_save, img_t2_for_save
-
     def draw_training_and_test_loss(self, epoch):
         fig, ax_all= plt.subplots(2,1,figsize=(12,9))
         xvalues = np.arange(epoch + 1)
@@ -680,7 +564,7 @@ class MMDMRITrainer(object):
         ckpt_dir = os.path.join('utils', self.args.task_name)
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        ds = MRIDataset(img_type=img_type, train=-1)
+        ds = MRIDataset(img_type=img_type, train=1)
         dl = DataLoader(ds, batch_size=100, shuffle=True, drop_last=True)
 
         net = VQVAE(
@@ -699,10 +583,6 @@ class MMDMRITrainer(object):
             for data in dl:
                 net.zero_grad()
                 data = data.to(self.device)
-                # data = torch.ones(20, 3, 240, 380).to(self.device)
-                # embedding_loss, rec, _ = net(data)
-                # recon_loss =  loss_func(rec, data)
-                # loss = recon_loss + embedding_loss
                 dec, diff = net(data)
                 
                 recon_loss = loss_func(dec, data)

@@ -26,7 +26,7 @@ plt.style.use('ggplot')
 
 from torch.optim.lr_scheduler import _LRScheduler
 from utils.resnet import ResNet
-from utils.dataset import CTMRDataset, PelvisDataset
+from utils.dataset import CTMRDataset
 from utils.vqvae_2 import VQVAE
 # from utils.vqvae_1 import VQVAE_1
 from utils.AE import AutoEncoder
@@ -274,17 +274,11 @@ class Trainer(object):
     
     def initilize(self):
 
-        # self.encoder = timm.create_model('wide_resnet50_2', features_only=True, pretrained=True).to(self.device)
-        # self.decoder_t1 = Decoder(input_shape=(256, int(self.input_size[0] // 8), int(self.input_size[1] // 8))).to(self.device)
-        # self.decoder_t2 = Decoder(input_shape=(256, int(self.input_size[0] // 8), int(self.input_size[1] // 8))).to(self.device)
-
         self.vqvae_t1 = VQVAE().to(self.device)
         self.vqvae_t2 = VQVAE().to(self.device)
 
-        self.vqvae_t1.load_state_dict(torch.load('utils/Task_009_pelvis/vqvae_results_ct_1.pth'), strict=True)
-        self.vqvae_t2.load_state_dict(torch.load('utils/Task_009_pelvis/vqvae_results_mr_1.pth'), strict=True)
-        # self.vqvae_t1.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_ct_1.pth'), strict=True)
-        # self.vqvae_t2.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_mr_1.pth'), strict=True)
+        self.vqvae_t1.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_ct_1.pth'), strict=True)
+        self.vqvae_t2.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_mr_1.pth'), strict=True)
 
         for p_1, p_2 in zip(self.vqvae_t1.parameters(), self.vqvae_t2.parameters()):
             p_1.requires_grad = False
@@ -313,28 +307,12 @@ class Trainer(object):
         ).to(self.device)
 
         
+        self._ds_source_train = CTMRDataset(img_type='CT', train=1)
+        self._ds_target_train = CTMRDataset(img_type='MR', train=1)
 
-        # print('------------------ Loading params --------------------------------')
-        # # self.nf_flow.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231118-191931/params/nf_flow_ckpt_1299.pth'), strict=True)
-        # self.nf_flow_t.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231121-234003/params/nf_flow_ckpt_cur_t.pth'), strict=True)
-        # self.nf_flow_b.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231121-234003/params/nf_flow_ckpt_cur_b.pth'), strict=True)
-        # # # self.nf_flow_t.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231115-160113/params/nf_flow_ckpt_1000_t.pth'), strict=True)
-        # # # self.nf_flow_b.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231115-160113/params/nf_flow_ckpt_1000_b.pth'), strict=True)
-        # # # self.nf_flow_t.load_state_dict(torch.load('mmd_results_Task_009_Pelvis/20231116-231648/params/nf_flow_ckpt_999_t.pth'), strict=True)
-        # # # self.nf_flow_b.load_state_dict(torch.load('mmd_results_Task_009_Pelvis/20231116-231648/params/nf_flow_ckpt_999_b.pth'), strict=True)
-        # print('------------------- Loaded Successfully ---------------------------')
-
-        # self._ds_source_train = CTMRDataset(img_type='CT', train=1)
-        # self._ds_target_train = CTMRDataset(img_type='MR', train=1)
-
-        # self._ds_source_test = CTMRDataset(img_type='CT', train=0)
-        # self._ds_target_test = CTMRDataset(img_type='MR', train=0)
+        self._ds_source_test = CTMRDataset(img_type='CT', train=0)
+        self._ds_target_test = CTMRDataset(img_type='MR', train=0)
         
-        self._ds_source_train = PelvisDataset(img_type='CT', train=1)
-        self._ds_target_train = PelvisDataset(img_type='MR', train=1)
-
-        self._ds_source_test = PelvisDataset(img_type='CT', train=0)
-        self._ds_target_test = PelvisDataset(img_type='MR', train=0)
 
 
         self._ds_train = PairDateset(self._ds_source_train, self._ds_target_train)
@@ -580,7 +558,7 @@ class Trainer(object):
         ckpt_dir = os.path.join('utils', self.args.task_name)
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        ds = CTMRDataset(img_type=img_type, train=-1)
+        ds = CTMRDataset(img_type=img_type, train=1)
         dl = DataLoader(ds, batch_size=64, shuffle=True, drop_last=True)
 
         net = AutoEncoder(
@@ -623,16 +601,14 @@ class Trainer(object):
         ckpt_dir = os.path.join('utils', self.args.task_name)
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        # ds = CTMRDataset(img_type=img_type, train=-1)
-        ds = PelvisDataset(img_type=img_type, train=-1)
+        ds = CTMRDataset(img_type=img_type, train=1)
         dl = DataLoader(ds, batch_size=100, shuffle=True, drop_last=True)
 
         net = VQVAE(
         ).to(self.device)
 
         # net.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_mr_0.pth'), strict=True)
-        # net.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_ct_res.pth'), strict=True)
-        net.load_state_dict(torch.load('utils/Task_009_pelvis/vqvae_results_mr_0.pth'), strict=True)
+        net.load_state_dict(torch.load('utils/Task_008_CT_MR/vqvae_results_ct_res.pth'), strict=True)
         optimizer = torch.optim.AdamW(net.parameters(), lr=1e-4, weight_decay=1e-5)
         loss_func = torch.nn.MSELoss()
 
@@ -673,7 +649,7 @@ class Trainer(object):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task_name', type=str, default='Task_009_pelvis')
+    parser.add_argument('--task_name', type=str, default='Task_008_CT_MR')
 
     parser.add_argument('--input_size', type=tuple, default=((256, 400)))
     parser.add_argument('--n_flows', type=int, default=8)

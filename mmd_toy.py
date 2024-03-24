@@ -20,8 +20,6 @@ import json
 import datetime
 # from torch.optim import lr_scheduler
 
-from utils.freia_funcs import permute_layer, glow_coupling_layer, F_fully_connected, ReversibleGraphNet, OutputNode, \
-    InputNode, Node
 
 def make_circles_ssl(n_samples, seed=0):
     
@@ -199,17 +197,7 @@ if __name__ == '__main__':
     
     source_data = build_dataset(datatype=args.source_data, args=args)
     target_data = build_dataset(datatype=args.target_data, args=args)
-    # source_data = make_multigaussian_ssl(n_samples=args.n_samples, n_gauss=8, start_angle=0, radius=10, var=.5)
-    # target_data = make_multigaussian_ssl(n_samples=args.n_samples, n_gauss=8, start_angle=0, radius=4, var=.5)
-
-    # mean1 = np.array([-8., 1.])
-    # cov1 = np.mat(np.array([[0.5, -0.25], [-0.25, 0.5]]))
-    # source_data = make_single_gauss(n_samples=args.n_samples, mean=mean1, cov=cov1, seed=args.data_seed)
-
-    # mean2 = np.array([0., 0.])
-    # cov2 = np.mat(np.array([[1, 0], [0, 1]]))
-    # target_data = make_single_gauss(n_samples=args.n_samples, mean=mean2, cov=cov2, seed=args.data_seed)
-
+    
     train_dataset = ToyDateset(source_data=source_data, target_data=target_data)
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 

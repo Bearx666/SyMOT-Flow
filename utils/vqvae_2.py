@@ -142,24 +142,18 @@ class Decoder(nn.Module):
         if stride == 4:
             blocks.extend(
                 [
-                    # nn.ConvTranspose2d(channel, channel // 2, 4, stride=2, padding=1),
-                    nn.Upsample(scale_factor=2, mode='nearest'),
-                    nn.Conv2d(channel, channel // 2, 3, 1, padding='same'),
+                    nn.ConvTranspose2d(channel, channel // 2, 4, stride=2, padding=1),
                     nn.ReLU(inplace=True),
-                    nn.Upsample(scale_factor=2, mode='nearest'),
-                    nn.Conv2d(channel // 2, out_channel, 3, 1, padding='same')
-                    # nn.ConvTranspose2d(
-                    #     channel // 2, out_channel, 4, stride=2, padding=1
-                    # ),
+                    nn.ConvTranspose2d(
+                        channel // 2, out_channel, 4, stride=2, padding=1
+                    ),
                 ]
             )
 
         elif stride == 2:
-            blocks.extend([
-                # nn.ConvTranspose2d(channel, out_channel, 4, stride=2, padding=1)
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv2d(channel, out_channel, 3, 1, padding='same')
-            ])
+            blocks.append(
+                nn.ConvTranspose2d(channel, out_channel, 4, stride=2, padding=1)
+            )
 
         self.blocks = nn.Sequential(*blocks)
 
@@ -189,12 +183,8 @@ class VQVAE(nn.Module):
         )
         self.quantize_conv_b = nn.Conv2d(embed_dim + channel, embed_dim, 1)
         self.quantize_b = Quantize(embed_dim, n_embed)
-        # self.upsample_t = nn.ConvTranspose2d(
-        #     embed_dim, embed_dim, 4, stride=2, padding=1
-        # )
-        self.upsample_t = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(embed_dim, embed_dim, 3, 1, padding='same')
+        self.upsample_t = nn.ConvTranspose2d(
+            embed_dim, embed_dim, 4, stride=2, padding=1
         )
         self.dec = Decoder(
             embed_dim + embed_dim,
@@ -279,7 +269,7 @@ if __name__ == '__main__':
 
     with torch.no_grad():
         net.eval()
-        x = torch.ones(5, 3, 192, 192)
+        x = torch.ones(5, 3, 128, 256)
         dec, diff = net(x)
         qt_a, qt_b, _, _, _ = net.encode(x)
         dec1 = net.decode(qt_a, qt_b)

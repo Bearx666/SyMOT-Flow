@@ -43,18 +43,6 @@ def flatten(img):
     img_flatten = img.view(img.size(0), -1)
     return img_flatten
 
-class convbnrelu_2d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1):
-        super(convbnrelu_2d, self).__init__()
-        self.conv_bn_relu = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU()
-        ) 
-        
-    def forward(self, x):
-        x = self.conv_bn_relu(x)
-        return x
 
 class PolyLRScheduler(_LRScheduler):
     def __init__(self, optimizer, initial_lr: float, max_steps: int, exponent: float = 0.9, current_step: int = None):
@@ -73,13 +61,6 @@ class PolyLRScheduler(_LRScheduler):
         new_lr = self.initial_lr * (1 - current_step / self.max_steps) ** self.exponent
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = new_lr
-
-def doubleconv(in_channels, out_channels, hidden_ratio=1.):
-    mid_channels = int(hidden_ratio * in_channels)
-    return nn.Sequential(
-        convbnrelu_2d(in_channels, mid_channels),
-        convbnrelu_2d(mid_channels, out_channels)
-    )
 
 class Logger(object):
     '''Save training process to log file with simple plot function.'''
@@ -113,62 +94,7 @@ class Logger(object):
         if self.file is not None:
             self.file.close()
 
-class res_conv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1):
-        super(res_conv, self).__init__()
-        self.conv_bn_relu_1 = nn.Sequential(
-            nn.BatchNorm2d(in_channels),
-            nn.ReLU(),
-            nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding='same', bias=False))
-        self.skip_1 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, padding='same')
-        )
-        self.conv_bn_relu_2 = nn.Sequential(
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(),
-            nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding='same', bias=False),
-        ) 
-        self.skip_2 = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, kernel_size=1, padding='same', bias=False)
-        )
-        
-    def forward(self, x):
-        x_skip = x
-
-        x = self.conv_bn_relu_1(x)
-        x_skip = self.skip_1(x_skip)
-        x = self.conv_bn_relu_2(x)
-        x_skip = self.skip_2(x_skip)
-        return x + x_skip
-    
-class Decoder(nn.Module):
-    def __init__(self, input_shape) -> None:
-        super(Decoder, self).__init__()
-
-        feature_channels = input_shape[0]
-
-        self.decoder = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            # doubleconv(feature_channels, feature_channels // 2),
-            res_conv(feature_channels, feature_channels // 2),
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            # doubleconv(feature_channels // 2, feature_channels // 4),
-            res_conv(feature_channels // 2, feature_channels // 4)
-            # nn.Upsample(scale_factor=2, mode='nearest'),
-            # doubleconv(feature_channels // 4, feature_channels // 8),
-        )
-        # self.out_conv = convbnrelu_2d(feature_channels // 4, 3)
-        self.out_conv = res_conv(feature_channels // 4, 3)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        
-        feature_x = self.decoder(x)
-        out_x = self.out_conv(feature_x)
-        
-        return out_x
-    
-    
+      
 class AverageCounter(object):
     def __init__(self) -> None:
         self.count = 0
@@ -213,17 +139,6 @@ def mmd(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
     loss = torch.mean(XX + YY - XY -YX)
     return loss
 
-def subnet_conv_func(kernel_size, hidden_ratio):
-    def subnet_conv(in_channels, out_channels):
-        hidden_dim = int(hidden_ratio * in_channels)
-        return nn.Sequential(
-            nn.Conv2d(in_channels, hidden_dim, kernel_size, padding="same"),
-            nn.BatchNorm2d(hidden_dim),
-            nn.ReLU(),
-            nn.Conv2d(hidden_dim, out_channels, kernel_size, padding="same"),
-            nn.BatchNorm2d(out_channels),
-        )
-    return subnet_conv
 
 def nf_flow(
         input_size,
@@ -285,6 +200,7 @@ class MMDMRITrainer(object):
         self.vqvae_t1 = VQVAE().to(self.device)
         self.vqvae_t2 = VQVAE().to(self.device)
 
+       
         self.vqvae_t1.load_state_dict(torch.load('vqvae_results_Task_002_MRI_T1_T2/vqvae_conv_t1_1.pth'), strict=True)
         self.vqvae_t2.load_state_dict(torch.load('vqvae_results_Task_002_MRI_T1_T2/vqvae_conv_t2_1.pth'), strict=True)
 
@@ -296,17 +212,14 @@ class MMDMRITrainer(object):
         self.vqvae_t2.eval()
 
         self.nf_flow_t  = nf_flow(
-            # input_size=(256, int(self.input_size[0] // 8), int(self.input_size[1] // 8)),
             input_size = (128, 24, 24), # /8
             n_flows=self.n_flows,
             conv3x3_only=self.conv3x3_only,
             hidden_ratio=self.hidden_ratio,
             clamp=self.clamp
         ).to(self.device)
-        # self.nf_flow.load_state_dict(torch.load('mmd_results_Task_008_CT_MR/20231113-091855/params/nf_flow_ckpt_best_for_train.pth'), strict=True)
 
         self.nf_flow_b  = nf_flow(
-            # input_size=(256, int(self.input_size[0] // 8), int(self.input_size[1] // 8)),
             input_size = (128, 48, 48), # /4
             n_flows=self.n_flows,
             conv3x3_only=self.conv3x3_only,
@@ -314,34 +227,29 @@ class MMDMRITrainer(object):
             clamp=self.clamp
         ).to(self.device)
 
-        self._ds_source_train = MRIDataset(train=1, img_type='T1')
-        self._ds_target_train = MRIDataset(train=1, img_type='T2')
+        self._ds_train_1 = MRIDataset(train=1, img_type='T1')
+        self._ds_train_2 = MRIDataset(train=1, img_type='T2')
 
         self._ds_source_test = MRIDataset(train=0, img_type='T1')
         self._ds_target_test = MRIDataset(train=0, img_type='T2')
 
 
-        self._ds_train = PairDateset(self._ds_source_train, self._ds_target_train)
-        self._dl_train = DataLoader(self._ds_train, batch_size=self.batch_size_tr, shuffle=True, drop_last=True)
+        self._dl_train_1 = DataLoader(self._ds_train_1, batch_size=self.batch_size_tr, shuffle=True, drop_last=True)
+        self._dl_train_2 = DataLoader(self._ds_train_2, batch_size=self.batch_size_tr, shuffle=True, drop_last=True)
 
         self._ds_test = PairDateset(self._ds_source_test, self._ds_target_test)
         self._dl_test = DataLoader(self._ds_test, batch_size=self.batch_size_ts, shuffle=False, drop_last=False)
 
-        # print(f'# of training dataset: {self._ds_source_train.__len__()}')
-        # print(f'# of test dataset: {self._ds_source_test.__len__()}')
 
         self.optimizer_t = torch.optim.AdamW(self.nf_flow_t.parameters(), lr=self.lr_t, weight_decay=self.weight_decay, betas=(0.9, 0.999))
         self.optimizer_b = torch.optim.AdamW(self.nf_flow_b.parameters(), lr=self.lr_b, weight_decay=self.weight_decay, betas=(0.9, 0.999))
-        # self.optimizer = torch.optim.SGD(self.nf_flow.parameters(), lr=self.lr_init, weight_decay=self.weight_decay, momentum=0.99, nesterov=True)
+
         self.lr_schedular_t = PolyLRScheduler(self.optimizer_t, self.lr_t, self.n_epochs)
         self.lr_schedular_b = PolyLRScheduler(self.optimizer_b, self.lr_b, self.n_epochs)
-        # self.lr_schedular = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.995)
 
         self.loss_avg_train = AverageCounter()
         self.loss_avg_test = AverageCounter()
 
-        # self.best_test_loss = np.inf
-        # self.best_train_loss = np.inf
 
         self.loss_of_training = np.zeros(self.n_epochs, )
         self.loss_of_test = np.zeros(self.n_epochs, )
@@ -360,9 +268,9 @@ class MMDMRITrainer(object):
         argsDict = args.__dict__
         args_path = str(self.output_dir) + '/args.json'
 
-        self.img_t1_dir = os.path.join(self.output_dir, 'T1')
+        self.img_t1_dir = os.path.join(self.output_dir, 'CT')
         os.makedirs(self.img_t1_dir, exist_ok=True)
-        self.img_t2_dir = os.path.join(self.output_dir, 'T2')
+        self.img_t2_dir = os.path.join(self.output_dir, 'MRI')
         os.makedirs(self.img_t2_dir, exist_ok=True)
         self.param = os.path.join(self.output_dir, 'params')
         os.makedirs(self.param, exist_ok=True)
@@ -399,15 +307,14 @@ class MMDMRITrainer(object):
             self.logger.append(f'Epoch: {epoch}, Total time cost: {time.time() - start_time} sec')
 
     def train_one_epoch(self, epoch):
-        # self.nf_flow_t.train()
-        # self.nf_flow_b.train()
-        self.loss_avg_train.restart()
-        for img_t1, img_t2 in self._dl_train:
-        # for (img_t1, img_t2)in zip(self._dl_source_train, self._dl_target_train):
-            img_t1, img_t2 = img_t1.to(self.device), img_t2.to(self.device)
 
-            # f_t1 = self.encoder(img_t1)[-4]
-            # f_t2 = self.encoder(img_t2)[-4]
+        self.nf_flow_t.train()
+        self.nf_flow_b.train()
+
+        self.loss_avg_train.restart()
+        for img_t1, img_t2 in zip(self._dl_train_1, self._dl_train_2):
+
+            img_t1, img_t2 = img_t1.to(self.device), img_t2.to(self.device)
 
             f_t1_t, f_t1_b = self.vqvae_t1.encode_1(img_t1)
             f_t2_t, f_t2_b = self.vqvae_t2.encode_1(img_t2)
@@ -465,23 +372,8 @@ class MMDMRITrainer(object):
             img_t2_fake = self.vqvae_t2.decode_1(f_t2_fake_t.detach(), f_t2_fake_b.detach())
 
 
-            # f_t1 = self.ae_t1.encode(img_t1)
-            # f_t2 = self.ae_t2.encode(img_t2)
-
-            # f_t2_fake, _ = self.nf_flow(f_t1)
-            # f_t1_fake, _ = self.nf_flow(f_t2, rev=True)
-
-            # img_t1_ae = self.ae_t1.decode(f_t1)
-            # img_t1_fake = self.ae_t1.decode(f_t1_fake)
-            # img_t2_ae = self.ae_t2.decode(f_t2)
-            # img_t2_fake = self.ae_t2.decode(f_t2_fake)
-        
-
-        # if epoch % 10 == 0:
             img_t1_for_save = torch.concat([img_t1_ae[:10].cpu(), img_t1_fake[:10].cpu()], dim=0)
-                # torchvision.utils.save_image(img_t1_for_save, os.path.join(self.img_t1_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show)  
             img_t2_for_save = torch.concat([img_t2_ae[:10].cpu(), img_t2_fake[:10].cpu()], dim=0)
-            # torchvision.utils.save_image(img_t2_for_save, os.path.join(self.img_t2_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show) 
         
 
         return self.loss_avg_train.getmean, img_t1_for_save, img_t2_for_save
@@ -490,7 +382,6 @@ class MMDMRITrainer(object):
         with torch.no_grad():
             self.loss_avg_test.restart()
             for img_t1, img_t2 in self._dl_test:
-            # for img_t1, img_t2 in zip(self._dl_source_test, self._dl_target_test):
                 img_t1, img_t2 = img_t1.to(self.device), img_t2.to(self.device)
 
                 f_t1_t, f_t1_b = self.vqvae_t1.encode_1(img_t1)
@@ -529,14 +420,12 @@ class MMDMRITrainer(object):
         self.logger.append(f'[Test] Epoch: {epoch}, Test Loss: {self.loss_avg_test.getmean:.6f}')
                 
 
-        # if epoch % 10 == 0:
         img_t1_for_save = torch.concat([img_t1_ae[:10].cpu(), img_t1_fake[:10].cpu()], dim=0)
-            # torchvision.utils.save_image(img_t1_for_save, os.path.join(self.img_t1_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show)  
         img_t2_for_save = torch.concat([img_t2_ae[:10].cpu(), img_t2_fake[:10].cpu()], dim=0)
-            # torchvision.utils.save_image(img_t2_for_save, os.path.join(self.img_t2_dir, 'img_' + str(epoch) + '.png'), nrow=self.size_for_show) 
         
         return self.loss_avg_test.getmean, img_t1_for_save, img_t2_for_save
-    
+
+
     def draw_training_and_test_loss(self, epoch):
         fig, ax_all= plt.subplots(2,1,figsize=(12,9))
         xvalues = np.arange(epoch + 1)
@@ -564,7 +453,7 @@ class MMDMRITrainer(object):
         ckpt_dir = os.path.join('utils', self.args.task_name)
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        ds = MRIDataset(img_type=img_type, train=1)
+        ds = MRIDataset(img_type=img_type, train=-1)
         dl = DataLoader(ds, batch_size=100, shuffle=True, drop_last=True)
 
         net = VQVAE(
@@ -583,6 +472,10 @@ class MMDMRITrainer(object):
             for data in dl:
                 net.zero_grad()
                 data = data.to(self.device)
+                # data = torch.ones(20, 3, 240, 380).to(self.device)
+                # embedding_loss, rec, _ = net(data)
+                # recon_loss =  loss_func(rec, data)
+                # loss = recon_loss + embedding_loss
                 dec, diff = net(data)
                 
                 recon_loss = loss_func(dec, data)
